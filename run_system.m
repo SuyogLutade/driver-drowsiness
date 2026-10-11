@@ -76,8 +76,9 @@ function runHardwareDiagnostics()
         end
         
         fprintf('2. Initializing default camera test...\n');
-        cam = webcam;
-        pause(1.5);
+        try evalin('base', 'clear cam'); catch; end
+        cam = webcam(1);
+        pause(1.2);
         testFrame = snapshot(cam);
         [H, W, C] = size(testFrame);
         fprintf('   Camera Resolution: %d x %d pixels (Channels: %d)\n', W, H, C);

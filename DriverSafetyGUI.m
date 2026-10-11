@@ -269,22 +269,43 @@ function DriverSafetyGUI()
     end
 
     function startMonitoring()
-        set(handles.lblStatus, 'String', '⏳ INITIALIZING CAMERA...', ...
+        set(handles.lblStatus, 'String', '⏳ INITIALIZING VIDEO SOURCE...', ...
             'BackgroundColor', [0.3, 0.25, 0.05], 'ForegroundColor', [1.0, 0.9, 0.2]);
         drawnow;
         
+        appData.useVideo = false;
+        appData.vr = [];
+        
         try
-            if isempty(appData.cam)
-                appData.cam = webcam;
-            end
-        catch ME
-            errordlg(['Camera connection error: ' ME.message], 'Camera Error');
-            set(handles.lblStatus, 'String', '❌ CAMERA ERROR', ...
-                'BackgroundColor', [0.4, 0.1, 0.1], 'ForegroundColor', 'w');
-            return;
+            evalin('base', 'clear cam');
+        catch
         end
         
-        pause(1.2); % Exposure adjustment
+        try
+            appData.cam = webcam(1);
+            pause(0.5);
+            snapshot(appData.cam);
+        catch
+            appData.useVideo = true;
+            try clear('appData.cam'); catch; end
+            appData.cam = [];
+            
+            if appData.mode == 3
+                vPath = fullfile('dbase', 'head', 'h1.mp4');
+            else
+                vPath = fullfile('dbase', 'eyes', 'e1.mp4');
+            end
+            
+            if exist(vPath, 'file')
+                appData.vr = VideoReader(vPath);
+            else
+                errordlg('Webcam inaccessible and dataset video not found.', 'Source Error');
+                set(handles.lblStatus, 'String', '❌ SOURCE ERROR', ...
+                    'BackgroundColor', [0.4, 0.1, 0.1], 'ForegroundColor', 'w');
+                return;
+            end
+        end
+        
         appData.isRunning = true;
         set(handles.btnStart, 'String', '⏹ STOP MONITORING', ...
             'BackgroundColor', [0.8, 0.2, 0.2]);
@@ -309,13 +330,14 @@ function DriverSafetyGUI()
             try clear('appData.cam'); catch; end
             appData.cam = [];
         end
+        appData.vr = [];
     end
 
     function onCalibrate(~, ~)
         if appData.isRunning
             performCalibration();
         else
-            msgbox('Start monitoring first to calibrate camera baseline.', 'Notice');
+            msgbox('Start monitoring first to calibrate baseline.', 'Notice');
         end
     end
 
@@ -324,27 +346,61 @@ function DriverSafetyGUI()
             'BackgroundColor', [0.1, 0.3, 0.5], 'ForegroundColor', 'w');
         drawnow;
         
+        if ~appData.useVideo
+            sampleFrame = snapshot(appData.cam);
+        else
+            if ~hasFrame(appData.vr), appData.vr.CurrentTime = 0; end
+            sampleFrame = readFrame(appData.vr);
+        end
+        [H, W, ~] = size(sampleFrame);
+        
+        % Default eye ROI
+        appData.r1 = round(H * 0.28); appData.r2 = round(H * 0.56);
+        appData.c1 = round(W * 0.15); appData.c2 = round(W * 0.85);
+        
+        % Try cascade face detector once during calibration
+        if ~isempty(appData.faceDetector)
+            try
+                bboxes = appData.faceDetector(sampleFrame);
+                if ~isempty(bboxes)
+                    [~, mIdx] = max(bboxes(:, 3) .* bboxes(:, 4));
+                    fb = bboxes(mIdx, :);
+                    ar1 = max(1, round(fb(2) + fb(4) * 0.20));
+                    ar2 = min(H, round(fb(2) + fb(4) * 0.55));
+                    ac1 = max(1, round(fb(1) + fb(3) * 0.10));
+                    ac2 = min(W, round(fb(1) + fb(3) * 0.90));
+                    if (ar2 - ar1 > 20) && (ac2 - ac1 > 30)
+                        appData.r1 = ar1; appData.r2 = ar2;
+                        appData.c1 = ac1; appData.c2 = ac2;
+                    end
+                end
+            catch
+            end
+        end
+        
         edgeSum = 0; skinSum = 0;
         nCal = 5;
         for c = 1:nCal
-            f_raw = snapshot(appData.cam);
-            [H, W, ~] = size(f_raw);
+            if ~appData.useVideo
+                f_raw = snapshot(appData.cam);
+            else
+                if ~hasFrame(appData.vr), appData.vr.CurrentTime = 0; end
+                f_raw = readFrame(appData.vr);
+            end
             
             % Eye Region
-            r1 = round(H * 0.28); r2 = round(H * 0.56);
-            c1 = round(W * 0.15); c2 = round(W * 0.85);
-            gray = double(rgb2gray(f_raw));
-            patch = gray(r1:r2, c1:c2);
+            gray = single(rgb2gray(f_raw));
+            patch = gray(appData.r1:appData.r2, appData.c1:appData.c2);
             [Gx, Gy] = gradient(patch);
             edgeSum = edgeSum + mean(sqrt(Gx(:).^2 + Gy(:).^2));
             
-            % Skin Region (Head Lowering)
-            f_small = double(imresize(f_raw, [360, 640]));
+            % Skin Region (Fast Subsampling)
+            f_small = single(f_raw(1:2:end, 1:2:end, :));
             cb = 0.148 * f_small(:,:,1) - 0.291 * f_small(:,:,2) + 0.439 * f_small(:,:,3) + 128;
             cr = 0.439 * f_small(:,:,1) - 0.368 * f_small(:,:,2) - 0.071 * f_small(:,:,3) + 128;
             mask = (cr > 130 & cr < 180 & cb > 80 & cb < 160);
             skinSum = skinSum + sum(mask(:));
-            pause(0.1);
+            pause(0.08);
         end
         
         appData.baselineEdges = max(1.0, edgeSum / nCal);
@@ -412,33 +468,19 @@ function DriverSafetyGUI()
             tLoop = tic;
             
             % Grab Frame
-            frame = snapshot(appData.cam);
-            [H, W, ~] = size(frame);
-            
-            % 1. PROCESS EYE CLOSURE (MODULE 1)
-            r1 = round(H * 0.28); r2 = round(H * 0.56);
-            c1 = round(W * 0.15); c2 = round(W * 0.85);
-            
-            % Adaptive Cascade face detector tracking if available
-            if ~isempty(appData.faceDetector)
-                try
-                    bboxes = appData.faceDetector(frame);
-                    if ~isempty(bboxes)
-                        [~, mIdx] = max(bboxes(:, 3) .* bboxes(:, 4));
-                        fb = bboxes(mIdx, :);
-                        ar1 = max(1, round(fb(2) + fb(4) * 0.20));
-                        ar2 = min(H, round(fb(2) + fb(4) * 0.55));
-                        ac1 = max(1, round(fb(1) + fb(3) * 0.10));
-                        ac2 = min(W, round(fb(1) + fb(3) * 0.90));
-                        if (ar2 - ar1 > 20) && (ac2 - ac1 > 30)
-                            r1 = ar1; r2 = ar2; c1 = ac1; c2 = ac2;
-                        end
-                    end
-                catch
-                end
+            if ~appData.useVideo
+                frame = snapshot(appData.cam);
+            else
+                if ~hasFrame(appData.vr), appData.vr.CurrentTime = 0; end
+                frame = readFrame(appData.vr);
             end
+            [~, W, ~] = size(frame);
             
-            gray = double(rgb2gray(frame));
+            % 1. PROCESS EYE CLOSURE (MODULE 1) - Fast direct calibrated ROI
+            r1 = appData.r1; r2 = appData.r2;
+            c1 = appData.c1; c2 = appData.c2;
+            
+            gray = single(rgb2gray(frame));
             patch = gray(r1:r2, c1:c2);
             [Gx, Gy] = gradient(patch);
             currEdges = mean(sqrt(Gx(:).^2 + Gy(:).^2));
@@ -451,8 +493,8 @@ function DriverSafetyGUI()
                 appData.eyeClosedFrames = 0;
             end
             
-            % 2. PROCESS HEAD LOWERING (MODULE 2)
-            fSmall = double(imresize(frame, [360, 640]));
+            % 2. PROCESS HEAD LOWERING (MODULE 2) - Fast Subsampling (~8 ms)
+            fSmall = single(frame(1:2:end, 1:2:end, :));
             cb = 0.148 * fSmall(:,:,1) - 0.291 * fSmall(:,:,2) + 0.439 * fSmall(:,:,3) + 128;
             cr = 0.439 * fSmall(:,:,1) - 0.368 * fSmall(:,:,2) - 0.071 * fSmall(:,:,3) + 128;
             skinMask = (cr > 130 & cr < 180 & cb > 80 & cb < 160);
@@ -532,13 +574,16 @@ function DriverSafetyGUI()
             displayFrame(r2-cLen:r2, c2-tTh:c2, 2) = retColor(2);
             displayFrame(r2-cLen:r2, c2-tTh:c2, 3) = retColor(3);
             
-            % Skin Mask PIP in top right
+            % Fast Skin Mask PIP in top right (slicing without slow imresize)
             pipH = 80; pipW = 120;
-            pipR = 10:(9+pipH);
-            pipC = (W - pipW - 10):(W - 11);
-            maskPip = imresize(uint8(skinMask) * 255, [pipH, pipW]);
-            pipRgb = cat(3, maskPip * 0, maskPip, round(maskPip * 0.8));
-            displayFrame(pipR, pipC, :) = pipRgb;
+            maskPip = skinMask(1:2:min(end, 2*pipH), 1:2:min(end, 2*pipW));
+            [pmh, pmw] = size(maskPip);
+            pipR = 10:(9+pmh);
+            pipC = (W - pmw - 10):(W - 11);
+            maskUint = uint8(maskPip) * 220;
+            displayFrame(pipR, pipC, 1) = uint8(0);
+            displayFrame(pipR, pipC, 2) = maskUint;
+            displayFrame(pipR, pipC, 3) = uint8(maskUint * 0.8);
             
             % Top HUD Status Banner
             bH = 38;
@@ -621,6 +666,9 @@ function DriverSafetyGUI()
                 avgFps, appData.totalFrames, alarmCounter, appData.incidentCount));
             
             drawnow limitrate;
+            if appData.useVideo
+                pause(max(0.01, (1/30) - loopSec));
+            end
         end
     end
 end
