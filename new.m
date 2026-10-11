@@ -58,9 +58,9 @@ fprintf('[2/4] Calibrating driver baseline (eyes open)...\n');
 fprintf('      >>> LOOK STRAIGHT AT CAMERA WITH EYES OPEN <<<\n');
 [H, W, ~] = size(sampleFrame);
 
-% Focused Eye Band (Centered on actual eye position: excludes eyebrows & mouth)
-r1 = round(H * 0.30); r2 = round(H * 0.46);
-c1 = round(W * 0.25); c2 = round(W * 0.75);
+% Focused Eye Band (Tightly centered on eye position: excludes eyebrows & mouth)
+r1 = round(H * 0.32); r2 = round(H * 0.44);
+c1 = round(W * 0.28); c2 = round(W * 0.72);
 
 % Try Cascade detector once during calibration to tightly lock onto eyes
 try
@@ -100,11 +100,11 @@ for k = 1:numCalib
 end
 
 baseline_edges = max(0.5, baseline_edges / numCalib);
-% Responsive threshold: 10% drop in focused eye band triggers closure
-edge_threshold = baseline_edges * 0.90;
+% Responsive threshold: 7% drop in focused eye band triggers closure
+edge_threshold = baseline_edges * 0.93;
 
 fprintf('      ✓ Baseline Edge Density (Eyes Open): %.2f\n', baseline_edges);
-fprintf('      ✓ Drowsiness Trigger Threshold:      %.2f (-10%% edge drop)\n', edge_threshold);
+fprintf('      ✓ Drowsiness Trigger Threshold:      %.2f (-7%% edge drop)\n', edge_threshold);
 fprintf('[3/4] Launching High-Definition HUD Display...\n');
 
 % -------------------------------------------------------------------------
