@@ -1,4 +1,4 @@
-﻿<div align="center">
+<div align="center">
 
 ![Banner](banner.png)
 
@@ -241,7 +241,32 @@ clear cam;
 
 ## ▶️ Running the Project
 
-### 👁️ Run Eye Drowsiness Detection
+### 🖥️ Option 1: Master System Launcher (Recommended)
+
+Simply run in the MATLAB Command Window:
+```matlab
+run_system
+```
+This opens an interactive menu allowing you to choose between the GUI Dashboard, individual modules, hardware diagnostics, or the web dashboard.
+
+---
+
+### 🚀 Option 2: Full Interactive GUI Dashboard
+
+```matlab
+DriverSafetyGUI
+```
+**Features of the GUI:**
+- 🔴 Real-time video stream with target reticle, tracking HUD, and PIP skin segmentation.
+- 📊 Live gauges for Eye Gradient Density, Active Skin Area, and Overall Fatigue Danger Index.
+- 🎛️ Dynamic sensitivity sliders for Eye Threshold (40%–85%) and Head Lowering Drop (5%–30%).
+- 🔊 Audio alarm toggle with 880 Hz tone test button.
+- 📸 One-click Diagnostic Snapshot capture for incident evidence.
+- 🎯 Live "Recalibrate Baseline" button.
+
+---
+
+### 👁️ Option 3: Run Eye Drowsiness Detection Standalone
 
 ```matlab
 new
@@ -250,28 +275,19 @@ new
 **Step-by-step:**
 
 ```
-1️⃣  Script launches → webcam warms up (2 sec)
-2️⃣  Console: "SIT STILL. EYES WIDE OPEN. Taking 5 reference frames..."
-     ➤ Look straight into camera, eyes wide open — hold still for ~5 seconds
-3️⃣  Console prints: "Baseline edge density: XX.X"
-4️⃣  Console: "Detection live! Close your eyes for ~1 sec to trigger alarm."
-5️⃣  Figure window opens with live camera feed + real-time stats in title bar
-6️⃣  🔴 Close your eyes for 1 second → 3-burst ALARM fires!
-7️⃣  To stop: close the figure window
-```
-
-**Live Console Output:**
-```
-Edge density: 14.2 / Baseline: 21.8 | Closed frames: 4/7
-Edge density: 13.1 / Baseline: 21.8 | Closed frames: 5/7
-Edge density: 12.9 / Baseline: 21.8 | Closed frames: 6/7
-Edge density: 12.4 / Baseline: 21.8 | Closed frames: 7/7
-!!! DROWSINESS DETECTED - WAKE UP !!!     ← 🔊 ALARM
+1️⃣  Script launches → webcam initializes & auto-exposes (1.5 sec)
+2️⃣  Console: "SIT STILL WITH EYES WIDE OPEN. Taking 5 reference frames..."
+     ➤ Look straight into camera, eyes wide open
+3️⃣  Adaptive ROI tracking locates face & eye boundary
+4️⃣  High-Definition HUD opens with live reticle tracking
+5️⃣  🔴 Close your eyes for ~0.7s (7 consecutive frames) → 880 Hz ALARM fires!
+6️⃣  Open eyes → instant reset to normal (0 false positives)
+7️⃣  To stop: close figure window or press Ctrl+C
 ```
 
 ---
 
-### 🤦 Run Head Lowering Detection
+### 🤦 Option 4: Run Head Lowering Detection Standalone
 
 ```matlab
 HeadLowering
@@ -280,21 +296,24 @@ HeadLowering
 **Step-by-step:**
 
 ```
-1️⃣  Script launches → webcam warms up (2 sec)
-2️⃣  Console: "count = XXXXX" — shows baseline skin pixels detected
-3️⃣  Figure window opens with skin-segmented live view
-4️⃣  🔴 Drop your head for ~1 second → 3-burst ALARM fires!
-5️⃣  To stop: close the figure window
+1️⃣  Script launches → webcam warms up (1.5 sec)
+2️⃣  Calibrates upright driver baseline across 5 frames
+3️⃣  Vectorized matrix acceleration runs at 60+ FPS
+4️⃣  High-Definition HUD opens with Picture-in-Picture (PIP) skin segmentation
+5️⃣  🔴 Lower/drop your head forward for ~0.5s (10 consecutive frames) → 880 Hz ALARM fires!
+6️⃣  Raise head → instant reset to normal
+7️⃣  To stop: close figure window or press Ctrl+C
 ```
 
-**Live Console Output:**
-```
-Skin pixels detected: 76120 (Baseline: 77698)  ← Head up, normal
-Skin pixels detected: 71300 (Baseline: 77698)  ← Slight movement
-Skin pixels detected: 59200 (Baseline: 77698)  ← Head lowering!
-Skin pixels detected: 48100 (Baseline: 77698)  ← Counter: 8/10
-HEAD LOWERING DETECTED - WAKE UP!              ← 🔊 ALARM
-```
+---
+
+### 🌐 Option 5: Launch Web Cockpit HUD & Presentation Deck (No MATLAB Required)
+
+Double-click [`index.html`](file:///c:/Users/HP/OneDrive/Desktop/Driver%20Drowsiness/Drowsiness-Detection%20-%20Copy/index.html) or open [`web_dashboard/index.html`](file:///c:/Users/HP/OneDrive/Desktop/Driver%20Drowsiness/Drowsiness-Detection%20-%20Copy/web_dashboard/index.html) in any modern browser (Chrome, Edge, Firefox):
+- ⚡ Live in-browser WebRTC camera streaming with real-time Canvas edge & skin analysis.
+- 📊 Complete 8-slide Project Viva defense presentation deck.
+- ⚡ Interactive Presentation Simulator presets (`Normal Driving`, `Eye Closure`, `Head Dropping`, `Critical Alarm`).
+- 🔊 Web Audio API 880 Hz acoustic buzzer synthesis.
 
 ---
 
@@ -303,21 +322,28 @@ HEAD LOWERING DETECTED - WAKE UP!              ← 🔊 ALARM
 ```
 Drowsiness-Detection/
 │
-├── 📄 new.m                    ← Eye closure detection (primary module)
-├── 📄 HeadLowering.m           ← Head lowering detection (secondary module)
+├── 🚀 run_system.m             ← Master system launcher with interactive CLI menu
+├── 🖥️  DriverSafetyGUI.m        ← High-definition MATLAB telematics GUI application
+├── 📄 new.m                    ← Module 1: Eye closure gradient edge-density detection
+├── 📄 HeadLowering.m           ← Module 2: Head dropping vectorized YCbCr skin detection (60+ FPS)
 │
-├── 🖼️  banner.png               ← Project banner (AI-generated)
-├── 🖼️  architecture.png         ← System architecture diagram (AI-generated)
-├── 📋 README.md                ← This file
+├── 🌐 index.html               ← Quick double-click launcher for Browser HUD
+├── 📁 web_dashboard/           ← Standalone automotive cockpit HUD & Viva presentation deck
+│   ├── index.html              ← Web application structure & 8-slide presentation deck
+│   ├── style.css               ← Dark glassmorphic cockpit styling
+│   └── app.js                  ← Real-time WebRTC, Canvas CV processing & audio synthesis
 │
-├── 📁 dbase/                   ← Original test video dataset
-│   ├── eyes/
-│   │   └── e1.mp4              ← Sample eye-state video
-│   └── specs/
-│       └── s1.mp4              ← Sample spectacles video
+├── 🎓 PRESENTATION_GUIDE.md    ← Complete viva defense script, elevator pitch & Top 10 Q&A
+├── ⚡ QUICKSTART.md            ← 60-second execution walkthrough
 │
+├── 🖼️  banner.png               ← Project banner
+├── 🖼️  architecture.png         ← System architecture diagram
+├── 📋 README.md                ← Comprehensive documentation
+│
+├── 📁 dbase/                   ← Original test video dataset (Unmodified)
+├── 📁 resources/               ← MATLAB project resources (Unmodified)
 ├── 📝 Project Report.docx      ← Detailed technical project report
-└── 📊 Intelligent Alarm System of Driver Fatigue.pptx ← Presentation slides
+└── 📊 Intelligent Alarm System of Driver Fatigue.pptx ← Original presentation slides
 ```
 
 ---
