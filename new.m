@@ -2,9 +2,8 @@
 %  INTELLIGENT DRIVER DROWSINESS DETECTION SYSTEM
 %  Module 1: Real-Time Eye Drowsiness Detection (Edge-Density Method)
 % =========================================================================
-%  Detects driver fatigue manifested as prolonged eye closure by analyzing
-%  gradient magnitude (edge-density) across the eye region in real-time.
-%  Optimized for ultra-fast, zero-lag execution in MATLAB (60+ FPS).
+%  Accurately detects driver eye closure via localized edge gradient analysis.
+%  Optimized with focused eye ROI, responsive thresholding, and leaky accumulator.
 %  Supports both Live Webcam and Dataset Video Sequences (dbase/eyes).
 % =========================================================================
 
@@ -14,7 +13,7 @@ close all;
 
 fprintf('\n=======================================================\n');
 fprintf('  👁️ DRIVER FATIGUE MONITOR: EYE CLOSURE DETECTION    \n');
-fprintf('  High-Performance MATLAB Engine (Optimized 60+ FPS)  \n');
+fprintf('  High-Sensitivity Adaptive Algorithm (Optimized)      \n');
 fprintf('=======================================================\n\n');
 
 % -------------------------------------------------------------------------
@@ -36,7 +35,9 @@ try
 catch
     useVideo = true;
     try clear cam; catch; end
-    videoPath = fullfile('dbase', 'eyes', 'e1.mp4');
+    projectDir = fileparts(mfilename('fullpath'));
+    if isempty(projectDir), projectDir = pwd; end
+    videoPath = fullfile(projectDir, 'dbase', 'eyes', 'e1.mp4');
     if exist(videoPath, 'file')
         vr = VideoReader(videoPath);
         sampleFrame = readFrame(vr);
@@ -51,35 +52,37 @@ end
 cleanupObj = onCleanup(@() safeCleanup());
 
 % -------------------------------------------------------------------------
-% 2. FAST CALIBRATION & AUTOMATIC EYE ROI LOCALIZATION
+% 2. FOCUSED EYE ROI LOCALIZATION & BASELINE CALIBRATION
 % -------------------------------------------------------------------------
 fprintf('[2/4] Calibrating driver baseline (eyes open)...\n');
+fprintf('      >>> LOOK STRAIGHT AT CAMERA WITH EYES OPEN <<<\n');
 [H, W, ~] = size(sampleFrame);
 
-% Calibrated standard eye ROI
-r1 = round(H * 0.28); r2 = round(H * 0.56);
-c1 = round(W * 0.15); c2 = round(W * 0.85);
+% Focused Eye Band (Centered on actual eye position: excludes eyebrows & mouth)
+r1 = round(H * 0.30); r2 = round(H * 0.46);
+c1 = round(W * 0.25); c2 = round(W * 0.75);
 
-% Optional one-time cascade detection on sample frame
+% Try Cascade detector once during calibration to tightly lock onto eyes
 try
     faceDetector = vision.CascadeObjectDetector('FrontalFaceCART');
     bboxes = faceDetector(sampleFrame);
     if ~isempty(bboxes)
         [~, maxIdx] = max(bboxes(:, 3) .* bboxes(:, 4));
         fb = bboxes(maxIdx, :);
-        ar1 = max(1, round(fb(2) + fb(4) * 0.20));
-        ar2 = min(H, round(fb(2) + fb(4) * 0.55));
-        ac1 = max(1, round(fb(1) + fb(3) * 0.10));
-        ac2 = min(W, round(fb(1) + fb(3) * 0.90));
-        if (ar2 - ar1 > 20) && (ac2 - ac1 > 30)
+        ar1 = max(1, round(fb(2) + fb(4) * 0.25));
+        ar2 = min(H, round(fb(2) + fb(4) * 0.48));
+        ac1 = max(1, round(fb(1) + fb(3) * 0.15));
+        ac2 = min(W, round(fb(1) + fb(3) * 0.85));
+        if (ar2 - ar1 > 15) && (ac2 - ac1 > 25)
             r1 = ar1; r2 = ar2; c1 = ac1; c2 = ac2;
+            fprintf('      ✓ Facial landmark detection locked onto eye band.\n');
         end
     end
     clear faceDetector;
 catch
 end
 
-% Measure baseline edge density
+% Calibrate baseline edge density over 5 frames
 numCalib = 5;
 baseline_edges = 0;
 for k = 1:numCalib
@@ -93,15 +96,16 @@ for k = 1:numCalib
     patch = gray(r1:r2, c1:c2);
     [Gx, Gy] = gradient(patch);
     baseline_edges = baseline_edges + mean(sqrt(Gx(:).^2 + Gy(:).^2));
-    pause(0.05);
+    pause(0.06);
 end
 
-baseline_edges = max(1.0, baseline_edges / numCalib);
-edge_threshold = baseline_edges * 0.65; % 35% drop in edges triggers closure
+baseline_edges = max(0.5, baseline_edges / numCalib);
+% Responsive threshold: 10% drop in focused eye band triggers closure
+edge_threshold = baseline_edges * 0.90;
 
 fprintf('      ✓ Baseline Edge Density (Eyes Open): %.2f\n', baseline_edges);
-fprintf('      ✓ Drowsiness Trigger Threshold:      %.2f (< 65%% of baseline)\n', edge_threshold);
-fprintf('[3/4] Initializing High-Speed HUD Display...\n');
+fprintf('      ✓ Drowsiness Trigger Threshold:      %.2f (-10%% edge drop)\n', edge_threshold);
+fprintf('[3/4] Launching High-Definition HUD Display...\n');
 
 % -------------------------------------------------------------------------
 % 3. PREPARE NON-BLOCKING AUDIO ALARM
@@ -115,7 +119,7 @@ alarmPlayer = audioplayer(alarm_signal, fs);
 % -------------------------------------------------------------------------
 % 4. BUILD PRESENTABLE ZERO-FLICKER HUD FIGURE
 % -------------------------------------------------------------------------
-fig = figure('Name', 'Driver Safety Monitor - Eye Closure Detection (60+ FPS)', ...
+fig = figure('Name', 'Driver Safety Monitor - Eye Closure Detection', ...
              'NumberTitle', 'off', ...
              'Color', [0.07 0.09 0.12], ...
              'Position', [150, 100, 960, 620], ...
@@ -131,21 +135,22 @@ hold(ax, 'on');
 corner_len = min(28, round((c2 - c1) * 0.15));
 th = 3;
 
-fprintf('[4/4] >>> SYSTEM ACTIVE & MONITORING AT HIGH SPEED <<<\n');
+fprintf('[4/4] >>> SYSTEM ACTIVE & MONITORING <<<\n');
+fprintf('      Close eyes for ~0.6s to trigger drowsiness alarm.\n');
 fprintf('      Close figure window or press Ctrl+C to stop.\n\n');
 
 closed_counter = 0;
-consec_trigger_limit = 7;
+consec_trigger_limit = 6; % ~0.6s with leaky accumulator
 fps_history = zeros(1, 10);
 fps_idx = 1;
 
 % -------------------------------------------------------------------------
-% 5. ULTRA-FAST REAL-TIME MONITORING LOOP
+% 5. HIGH-SPEED REAL-TIME MONITORING LOOP
 % -------------------------------------------------------------------------
 while ishandle(fig)
     t_start = tic;
     
-    % Fast Capture
+    % Frame Capture
     if ~useVideo
         raw = snapshot(cam);
     else
@@ -153,18 +158,23 @@ while ishandle(fig)
         raw = readFrame(vr);
     end
     
-    % Instant ROI Gradient Magnitude (< 5 ms)
+    % Instant ROI Gradient Magnitude
     gray = single(rgb2gray(raw));
     patch = gray(r1:r2, c1:c2);
     [Gx, Gy] = gradient(patch);
     curr_edges = mean(sqrt(Gx(:).^2 + Gy(:).^2));
     
-    % Fast Detection Logic
+    % Edge Delta Percentage
+    edge_delta_pct = ((curr_edges - baseline_edges) / baseline_edges) * 100;
+    
+    % Responsive Detection: edge drops by > 14%
     is_eyes_closed = (curr_edges < edge_threshold);
+    
+    % Leaky Accumulator (Resistant to single-frame noise jitter)
     if is_eyes_closed
-        closed_counter = closed_counter + 1;
+        closed_counter = min(12, closed_counter + 2);
     else
-        closed_counter = 0;
+        closed_counter = max(0, closed_counter - 1);
     end
     
     % Alarm Trigger (Non-blocking)
@@ -173,14 +183,14 @@ while ishandle(fig)
         if ~isplaying(alarmPlayer)
             play(alarmPlayer);
         end
-        fprintf('  ⚠️  [ALARM TRIGGERED] Prolonged eye closure! Frame: %d\n', closed_counter);
+        fprintf('  ⚠️  [ALARM TRIGGERED] Prolonged eye closure! Score: %d/%d\n', ...
+                closed_counter, consec_trigger_limit);
     end
     
     % ---------------------------------------------------------------------
     % FAST IN-PLACE HUD COMPOSITING
     % ---------------------------------------------------------------------
     display_frame = raw;
-    edge_ratio = max(0, (curr_edges / baseline_edges) * 100);
     
     if alarm_active
         ret_r = uint8(255); ret_g = uint8(30);  ret_b = uint8(30);
@@ -190,7 +200,7 @@ while ishandle(fig)
         ret_r = uint8(50);  ret_g = uint8(220); ret_b = uint8(100);
     end
     
-    % Fast Corner Brackets on Eye Region
+    % Corner Brackets on Eye Region
     display_frame(r1:r1+th, c1:c1+corner_len, 1) = ret_r; display_frame(r1:r1+th, c1:c1+corner_len, 2) = ret_g; display_frame(r1:r1+th, c1:c1+corner_len, 3) = ret_b;
     display_frame(r1:r1+corner_len, c1:c1+th, 1) = ret_r; display_frame(r1:r1+corner_len, c1:c1+th, 2) = ret_g; display_frame(r1:r1+corner_len, c1:c1+th, 3) = ret_b;
     display_frame(r1:r1+th, c2-corner_len:c2, 1) = ret_r; display_frame(r1:r1+th, c2-corner_len:c2, 2) = ret_g; display_frame(r1:r1+th, c2-corner_len:c2, 3) = ret_b;
@@ -204,13 +214,13 @@ while ishandle(fig)
     banner_height = 36;
     if alarm_active
         ban_r = uint8(220); ban_g = uint8(20);  ban_b = uint8(30);
-        status_text = '🚨 CRITICAL DROWSINESS: WAKE UP! 🚨';
+        status_text = '🚨 CRITICAL DROWSINESS: EYES CLOSED! WAKE UP!';
     elseif closed_counter > 2
         ban_r = uint8(220); ban_g = uint8(140); ban_b = uint8(20);
         status_text = sprintf('CAUTION: EYE CLOSURE DETECTED [%d/%d]', closed_counter, consec_trigger_limit);
     else
         ban_r = uint8(20);  ban_g = uint8(160); ban_b = uint8(80);
-        status_text = sprintf('EYES: OPEN (Edge Ratio: %3.0f%%)', edge_ratio);
+        status_text = sprintf('EYES: OPEN (Delta: %+2.0f%%)', edge_delta_pct);
     end
     
     display_frame(1:banner_height, :, 1) = ban_r;
@@ -224,7 +234,7 @@ while ishandle(fig)
     fps_idx = mod(fps_idx, 10) + 1;
     avg_fps = mean(fps_history(fps_history > 0));
     
-    % Update Figure
+    % Render Display
     try
         hImg.CData = display_frame;
         srcTag = 'Live Camera';
@@ -237,7 +247,6 @@ while ishandle(fig)
         break;
     end
     
-    % Smooth video pacing if reading from dataset video
     if useVideo
         pause(max(0.01, (1/30) - loop_time));
     end

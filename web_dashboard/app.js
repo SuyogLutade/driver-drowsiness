@@ -13,20 +13,25 @@ const state = {
   // Baseline Parameters
   baselineEdges: 12.0,
   baselineSkin: 35000,
+  baselineY: 60.0,
+  baselineUpper: 12000,
+  ySplit: 60,
   
   // Real-Time Metrics
   currEdges: 12.0,
   currSkin: 35000,
+  currY: 60.0,
+  currUpperSkin: 12000,
   eyeClosedFrames: 0,
   headLoweredFrames: 0,
   fatigueScore: 0,
   isAlarm: false,
   
   // Configuration Limits
-  eyeTriggerLimit: 7,   // Consecutive frames for eye closure (~0.7s)
-  headTriggerLimit: 10, // Consecutive frames for head drop (~0.5s)
-  eyeDropThreshold: 0.65, // 35% drop in edge density
-  headDropThreshold: 0.10, // 10% drop in skin area
+  eyeTriggerLimit: 6,   // Consecutive frames for eye closure (~0.5s)
+  headTriggerLimit: 6,  // Consecutive frames for head drop (~0.5s)
+  eyeDropThreshold: 0.90, // 10% drop in edge density
+  headShiftThreshold: 5.5, // 5.5 px downward shift
   
   // Waveform History
   edgeHistory: new Array(60).fill(12.0),
@@ -212,6 +217,8 @@ function calibrateBaseline() {
   let calibFrames = 0;
   let edgeAccum = 0;
   let skinAccum = 0;
+  let yAccum = 0;
+  let upperAccum = 0;
 
   const calibInterval = setInterval(() => {
     if (!state.isStreaming && !state.isSimulating) {
@@ -223,19 +230,24 @@ function calibrateBaseline() {
     const metrics = computeFrameMetrics();
     edgeAccum += metrics.edges;
     skinAccum += metrics.skin;
+    yAccum += metrics.currY;
+    upperAccum += metrics.upperSkin;
     calibFrames++;
 
     if (calibFrames >= 5) {
       clearInterval(calibInterval);
       state.baselineEdges = Math.max(1.0, edgeAccum / 5);
       state.baselineSkin = Math.max(100, skinAccum / 5);
+      state.baselineY = yAccum / 5;
+      state.ySplit = Math.round(state.baselineY);
+      state.baselineUpper = Math.max(50, upperAccum / 5);
       state.isCalibrated = true;
       calibOverlay.classList.remove('active');
 
       valEyeBaseEl.textContent = state.baselineEdges.toFixed(1);
       valHeadBaseEl.textContent = Math.round(state.baselineSkin).toLocaleString();
 
-      logAudit(`✓ Calibration complete. Base Edges: ${state.baselineEdges.toFixed(1)}, Base Skin: ${Math.round(state.baselineSkin)}`);
+      logAudit(`✓ Calibration complete. Base Edges: ${state.baselineEdges.toFixed(1)}, Base Skin: ${Math.round(state.baselineSkin)}, Base Y: ${state.baselineY.toFixed(1)}`);
     }
   }, 200);
 }
@@ -251,7 +263,7 @@ const offCtx = offCanvas.getContext('2d');
 
 function computeFrameMetrics() {
   if (!state.isStreaming && !state.isSimulating) {
-    return { edges: 12.0, skin: 35000, skinMaskData: null };
+    return { edges: 12.0, skin: 35000, currY: 60, upperSkin: 12000, pipImageData: null };
   }
 
   // Draw current video frame to off-screen buffer
@@ -262,11 +274,11 @@ function computeFrameMetrics() {
   const frameData = offCtx.getImageData(0, 0, 640, 480);
   const data = frameData.data;
 
-  // 1. Process Eye Region (Rows: 28% - 56%, Cols: 15% - 85%)
-  const r1 = Math.round(480 * 0.28);
-  const r2 = Math.round(480 * 0.56);
-  const c1 = Math.round(640 * 0.15);
-  const c2 = Math.round(640 * 0.85);
+  // 1. Process Eye Region (Focused Eye Band: Rows 31% - 45%, Cols 26% - 74%)
+  const r1 = Math.round(480 * 0.31);
+  const r2 = Math.round(480 * 0.45);
+  const c1 = Math.round(640 * 0.26);
+  const c2 = Math.round(640 * 0.74);
 
   let edgeSum = 0;
   let pixelSamples = 0;
@@ -291,8 +303,11 @@ function computeFrameMetrics() {
   }
   const avgEdges = pixelSamples > 0 ? (edgeSum / pixelSamples) : 10.0;
 
-  // 2. Process Head Lowering YCbCr Skin Segmentation
+  // 2. Process Head Lowering YCbCr Skin Segmentation & Vertical Centroid
   let skinCount = 0;
+  let skinRowSum = 0;
+  let upperSkinCount = 0;
+  const ySplit = state.ySplit || 60;
   const pipData = pipCtx.createImageData(160, 120);
   const pipPixels = pipData.data;
 
@@ -312,8 +327,12 @@ function computeFrameMetrics() {
       const cr = 0.439 * r - 0.368 * g - 0.071 * b + 128;
 
       const pIdx = (py * 160 + px) * 4;
-      if (cr > 130 && cr < 180 && cb > 80 && cb < 160) {
+      if (cr >= 125 && cr <= 185 && cb >= 75 && cb <= 165) {
         skinCount += 16; // scaled to 640x480 equivalent
+        skinRowSum += py;
+        if (py < ySplit) {
+          upperSkinCount += 16;
+        }
         // Cyan mask in PIP
         pipPixels[pIdx] = 0;
         pipPixels[pIdx + 1] = 230;
@@ -328,7 +347,10 @@ function computeFrameMetrics() {
     }
   }
 
-  return { edges: avgEdges, skin: skinCount, pipImageData: pipData };
+  const skinPixelsCount = skinCount / 16;
+  const currY = skinPixelsCount > 0 ? (skinRowSum / skinPixelsCount) : ((state.baselineY || 60) + 20);
+
+  return { edges: avgEdges, skin: skinCount, currY: currY, upperSkin: upperSkinCount, pipImageData: pipData };
 }
 
 function processVideoFrame() {
@@ -337,6 +359,8 @@ function processVideoFrame() {
   const metrics = computeFrameMetrics();
   state.currEdges = metrics.edges;
   state.currSkin = metrics.skin;
+  state.currY = metrics.currY;
+  state.currUpperSkin = metrics.upperSkin;
 
   // Update Waveform History
   state.edgeHistory.push(metrics.edges);
@@ -379,24 +403,25 @@ function evaluateDrowsiness() {
   const edgeThreshold = state.baselineEdges * state.eyeDropThreshold;
   const isEyesClosed = state.currEdges < edgeThreshold;
 
-  const skinDropThreshold = state.baselineSkin * state.headDropThreshold;
-  const isHeadLowered = (state.baselineSkin - state.currSkin) > skinDropThreshold;
+  const yShift = (state.currY || state.baselineY) - state.baselineY;
+  const upperDropPct = ((state.baselineUpper - (state.currUpperSkin || 0)) / Math.max(1, state.baselineUpper)) * 100;
+  const isHeadLowered = (yShift > state.headShiftThreshold) || (upperDropPct > 12) || (state.currSkin < state.baselineSkin * 0.85);
 
-  // Eye Counter
+  // Leaky Accumulator for Eye Closure
   if (isEyesClosed) {
-    state.eyeClosedFrames++;
+    state.eyeClosedFrames = Math.min(12, state.eyeClosedFrames + 2);
   } else {
-    state.eyeClosedFrames = 0; // Instant reset
+    state.eyeClosedFrames = Math.max(0, state.eyeClosedFrames - 1);
   }
 
-  // Head Lowering Counter
+  // Leaky Accumulator for Head Lowering
   if (isHeadLowered) {
-    state.headLoweredFrames++;
+    state.headLoweredFrames = Math.min(12, state.headLoweredFrames + 2);
   } else {
-    state.headLoweredFrames = 0; // Instant reset
+    state.headLoweredFrames = Math.max(0, state.headLoweredFrames - 1);
   }
 
-  // Dangerous condition
+  // Dangerous condition (leaky accumulator threshold)
   const eyeTriggered = state.eyeClosedFrames >= state.eyeTriggerLimit;
   const headTriggered = state.headLoweredFrames >= state.headTriggerLimit;
   const wasAlarm = state.isAlarm;
@@ -417,7 +442,7 @@ function evaluateDrowsiness() {
     }
 
     if (!wasAlarm) {
-      const cause = eyeTriggered ? 'PROLONGED EYE CLOSURE' : 'HEAD LOWERED';
+      const cause = eyeTriggered ? 'PROLONGED EYE CLOSURE' : 'HEAD LOWERED / NOD OFF';
       logAudit(`🚨 [CRITICAL ALARM] Drowsiness event triggered: ${cause}!`, true);
     }
   }
@@ -430,11 +455,11 @@ function drawCockpitHUD() {
   const w = hudCanvas.width;
   const h = hudCanvas.height;
 
-  // 1. Target Reticle Coordinates (Eyes ROI)
-  const r1 = Math.round(h * 0.28);
-  const r2 = Math.round(h * 0.56);
-  const c1 = Math.round(w * 0.15);
-  const c2 = Math.round(w * 0.85);
+  // 1. Target Reticle Coordinates (Eyes ROI - Focused Eye Band)
+  const r1 = Math.round(h * 0.31);
+  const r2 = Math.round(h * 0.45);
+  const c1 = Math.round(w * 0.26);
+  const c2 = Math.round(w * 0.74);
 
   let reticleColor = '#00e676';
   if (state.eyeClosedFrames > 2 && !state.isAlarm) {

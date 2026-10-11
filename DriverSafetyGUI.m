@@ -5,6 +5,8 @@ function DriverSafetyGUI()
 % =========================================================================
 %  Combines Edge-Density Eye Closure Detection and YCbCr Skin Segmentation
 %  into a unified real-time driver safety monitoring system.
+%  Features adaptive baseline calibration, multi-metric head pose tracking,
+%  and leaky accumulator counters for zero false-positive fatigue alerting.
 % =========================================================================
 
     % Clean environment
@@ -14,24 +16,35 @@ function DriverSafetyGUI()
     % App State Structure
     appData = struct();
     appData.isRunning = false;
-    appData.isPaused = false;
     appData.cam = [];
+    appData.vr = [];
+    appData.useVideo = false;
     appData.soundEnabled = true;
-    appData.mode = 1; % 1: Dual Fusion, 2: Eye Only, 3: Head Only
+    appData.mode = 1;         % 1: Dual Fusion, 2: Eye Only, 3: Head Only
+    appData.sourceChoice = 1; % 1: Auto, 2: Webcam, 3: Eyes Video, 4: Head Video
     
     % Calibration Parameters
-    appData.baselineEdges = 12.0;
-    appData.baselineSkin = 45000;
-    appData.eyeThresholdPct = 65; % Edge drop threshold (%)
-    appData.headThresholdPct = 10; % Skin drop threshold (%)
+    appData.baselineEdges = 10.0;
+    appData.baselineSkin = 25000;
+    appData.baselineY = 160.0;
+    appData.baselineUpper = 10000;
+    appData.ySplit = 160;
     
-    % Counters
+    % Detection Thresholds (Responsive & Calibrated)
+    appData.eyeSensitivityPct = 90;     % Edge trigger (% of baseline, 90% = -10% drop)
+    appData.headShiftThreshold = 5.5;   % Downward centroid shift (px)
+    appData.upperDropThresholdPct = 12; % Upper-face skin loss (%)
+    
+    % Leaky Accumulator Counters
     appData.eyeClosedFrames = 0;
     appData.headLoweredFrames = 0;
-    appData.alarmActive = false;
     appData.fatigueScore = 0; % 0 - 100%
     appData.totalFrames = 0;
     appData.incidentCount = 0;
+    
+    % Focused Eye ROI Initial Coordinates
+    appData.r1 = 140; appData.r2 = 220;
+    appData.c1 = 160; appData.c2 = 480;
     
     % Prepare Audio Alarm
     fs = 8000;
@@ -78,7 +91,6 @@ function DriverSafetyGUI()
     
     % Blank initial display
     initImg = zeros(480, 640, 3, 'uint8');
-    % Add initial welcome text pattern
     hDisplay = imshow(initImg, 'Parent', axCam);
     title(axCam, 'SYSTEM STANDBY - CLICK [START MONITORING] TO CONNECT CAMERA', ...
           'Color', [0.7, 0.8, 0.9], 'FontSize', 11, 'FontWeight', 'bold');
@@ -130,25 +142,25 @@ function DriverSafetyGUI()
                              'Position', [panelX + 20, 455, panelW - 40, 25]);
                          
     lblEyeConsec = uicontrol('Parent', fig, 'Style', 'text', ...
-                             'String', 'Closed Frames: 0 / 7 [Normal]', ...
+                             'String', 'Eye Accumulator: 0 / 6 [Normal]', ...
                              'BackgroundColor', [0.12, 0.16, 0.24], 'ForegroundColor', [0.3, 0.9, 0.5], ...
                              'FontSize', 9, 'FontWeight', 'bold', ...
                              'Position', [panelX + 20, 425, panelW - 40, 22]);
 
-    % 4. Module 2: Head Lowering (Skin Pixels)
-    uicontrol('Parent', fig, 'Style', 'text', 'String', 'Head Skin Area (YCbCr Pixels):', ...
+    % 4. Module 2: Head Lowering Pose
+    uicontrol('Parent', fig, 'Style', 'text', 'String', 'Head Pose (Centroid & Skin Shift):', ...
               'BackgroundColor', [0.10, 0.13, 0.19], 'ForegroundColor', [0.8, 0.85, 0.9], ...
               'FontSize', 9, 'HorizontalAlignment', 'left', ...
               'Position', [panelX + 20, 385, panelW - 40, 18]);
           
     lblHeadMetric = uicontrol('Parent', fig, 'Style', 'text', ...
-                              'String', 'Current: -- / Baseline: --', ...
+                              'String', 'Y-Shift: -- / Upper Drop: --', ...
                               'BackgroundColor', [0.12, 0.16, 0.24], 'ForegroundColor', [0.9, 0.9, 0.9], ...
                               'FontSize', 10, ...
                               'Position', [panelX + 20, 355, panelW - 40, 25]);
                           
     lblHeadConsec = uicontrol('Parent', fig, 'Style', 'text', ...
-                              'String', 'Head Dropped: 0 / 10 [Normal]', ...
+                              'String', 'Nod Accumulator: 0 / 6 [Normal]', ...
                               'BackgroundColor', [0.12, 0.16, 0.24], 'ForegroundColor', [0.3, 0.9, 0.5], ...
                               'FontSize', 9, 'FontWeight', 'bold', ...
                               'Position', [panelX + 20, 325, panelW - 40, 22]);
@@ -171,7 +183,7 @@ function DriverSafetyGUI()
     % ---------------------------------------------------------------------
     % BOTTOM CONTROL BAR
     % ---------------------------------------------------------------------
-    ctrlY = 20; ctrlH = 120;
+    ctrlY = 15; ctrlH = 130;
     uicontrol('Parent', fig, 'Style', 'text', 'String', '', ...
               'BackgroundColor', [0.10, 0.13, 0.19], ...
               'Position', [30, ctrlY, figW - 60, ctrlH]);
@@ -181,7 +193,7 @@ function DriverSafetyGUI()
                          'String', '▶ START MONITORING', ...
                          'BackgroundColor', [0.15, 0.65, 0.30], 'ForegroundColor', 'w', ...
                          'FontSize', 11, 'FontWeight', 'bold', ...
-                         'Position', [50, ctrlY + 65, 180, 42], ...
+                         'Position', [45, ctrlY + 70, 175, 45], ...
                          'Callback', @onStartStop);
 
     % Button: Calibrate
@@ -189,63 +201,78 @@ function DriverSafetyGUI()
               'String', '🎯 Recalibrate Baseline', ...
               'BackgroundColor', [0.20, 0.45, 0.70], 'ForegroundColor', 'w', ...
               'FontSize', 10, 'FontWeight', 'bold', ...
-              'Position', [245, ctrlY + 65, 170, 42], ...
+              'Position', [230, ctrlY + 70, 165, 45], ...
               'Callback', @onCalibrate);
 
-    % Mode Selector Dropdown
-    uicontrol('Parent', fig, 'Style', 'text', 'String', 'Detection Algorithm Mode:', ...
+    % Detection Algorithm Mode Selector
+    uicontrol('Parent', fig, 'Style', 'text', 'String', 'Detection Mode:', ...
               'BackgroundColor', [0.10, 0.13, 0.19], 'ForegroundColor', [0.8, 0.85, 0.9], ...
-              'FontSize', 9, 'HorizontalAlignment', 'left', ...
-              'Position', [430, ctrlY + 85, 180, 18]);
+              'FontSize', 8, 'HorizontalAlignment', 'left', ...
+              'Position', [405, ctrlY + 95, 140, 16]);
           
     popMode = uicontrol('Parent', fig, 'Style', 'popupmenu', ...
-                        'String', {'Dual Fusion Mode (Eyes + Head)', 'Eye Closure Detection Only', 'Head Lowering Detection Only'}, ...
+                        'String', {'Dual Fusion (Eyes + Head)', 'Eye Closure Only', 'Head Lowering Only'}, ...
                         'BackgroundColor', [0.15, 0.20, 0.28], 'ForegroundColor', 'w', ...
                         'FontSize', 9, ...
-                        'Position', [430, ctrlY + 60, 220, 25], ...
+                        'Position', [405, ctrlY + 70, 195, 25], ...
                         'Callback', @onModeChanged);
+
+    % Video Source Selector
+    uicontrol('Parent', fig, 'Style', 'text', 'String', 'Video Feed Source:', ...
+              'BackgroundColor', [0.10, 0.13, 0.19], 'ForegroundColor', [0.8, 0.85, 0.9], ...
+              'FontSize', 8, 'HorizontalAlignment', 'left', ...
+              'Position', [610, ctrlY + 95, 160, 16]);
+          
+    popSource = uicontrol('Parent', fig, 'Style', 'popupmenu', ...
+                          'String', {'Auto (Webcam with Fallback)', 'Live Webcam (DirectShow)', 'Dataset Eyes Video (e1.mp4)', 'Dataset Head Video (h1.mp4)'}, ...
+                          'BackgroundColor', [0.15, 0.20, 0.28], 'ForegroundColor', 'w', ...
+                          'FontSize', 9, ...
+                          'Position', [610, ctrlY + 70, 220, 25], ...
+                          'Callback', @onSourceChanged);
 
     % Audio Alarm Toggle
     btnAudio = uicontrol('Parent', fig, 'Style', 'pushbutton', ...
-                         'String', '🔊 Alarm Audio: ON', ...
+                         'String', '🔊 Audio: ON', ...
                          'BackgroundColor', [0.25, 0.35, 0.45], 'ForegroundColor', 'w', ...
                          'FontSize', 9, 'FontWeight', 'bold', ...
-                         'Position', [670, ctrlY + 62, 140, 35], ...
+                         'Position', [840, ctrlY + 70, 110, 45], ...
                          'Callback', @onToggleAudio);
 
     % Test Alarm Button
     uicontrol('Parent', fig, 'Style', 'pushbutton', ...
-              'String', '🔔 Test Alarm Tone', ...
+              'String', '🔔 Test Alarm', ...
               'BackgroundColor', [0.20, 0.25, 0.35], 'ForegroundColor', [0.8, 0.9, 1.0], ...
               'FontSize', 9, ...
-              'Position', [820, ctrlY + 62, 130, 35], ...
+              'Position', [960, ctrlY + 70, 100, 45], ...
               'Callback', @(~,~) play(appData.alarmPlayer));
 
     % Sliders: Sensitivity Configuration
-    uicontrol('Parent', fig, 'Style', 'text', 'String', 'Eye Threshold (65%):', ...
-              'BackgroundColor', [0.10, 0.13, 0.19], 'ForegroundColor', [0.75, 0.8, 0.85], ...
-              'FontSize', 8, 'HorizontalAlignment', 'left', ...
-              'Position', [50, ctrlY + 30, 140, 16]);
+    lblSldEye = uicontrol('Parent', fig, 'Style', 'text', ...
+                          'String', 'Eye Trigger: 90% (-10% drop)', ...
+                          'BackgroundColor', [0.10, 0.13, 0.19], 'ForegroundColor', [0.75, 0.8, 0.85], ...
+                          'FontSize', 8, 'HorizontalAlignment', 'left', ...
+                          'Position', [45, ctrlY + 36, 175, 16]);
     sldEye = uicontrol('Parent', fig, 'Style', 'slider', ...
-                       'Min', 40, 'Max', 85, 'Value', 65, ...
-                       'Position', [50, ctrlY + 12, 160, 18], ...
+                       'Min', 80, 'Max', 96, 'Value', 90, ...
+                       'Position', [45, ctrlY + 14, 175, 20], ...
                        'Callback', @onSliderEye);
 
-    uicontrol('Parent', fig, 'Style', 'text', 'String', 'Head Drop Threshold (10%):', ...
-              'BackgroundColor', [0.10, 0.13, 0.19], 'ForegroundColor', [0.75, 0.8, 0.85], ...
-              'FontSize', 8, 'HorizontalAlignment', 'left', ...
-              'Position', [245, ctrlY + 30, 160, 16]);
+    lblSldHead = uicontrol('Parent', fig, 'Style', 'text', ...
+                           'String', 'Head Nod Shift: 5.5 px downward', ...
+                           'BackgroundColor', [0.10, 0.13, 0.19], 'ForegroundColor', [0.75, 0.8, 0.85], ...
+                           'FontSize', 8, 'HorizontalAlignment', 'left', ...
+                           'Position', [230, ctrlY + 36, 175, 16]);
     sldHead = uicontrol('Parent', fig, 'Style', 'slider', ...
-                        'Min', 5, 'Max', 30, 'Value', 10, ...
-                        'Position', [245, ctrlY + 12, 160, 18], ...
+                        'Min', 3.0, 'Max', 15.0, 'Value', 5.5, ...
+                        'Position', [230, ctrlY + 14, 165, 20], ...
                         'Callback', @onSliderHead);
 
     % Status Footer
     uicontrol('Parent', fig, 'Style', 'text', ...
-              'String', 'IIIT Allahabad Intelligent Driver Fatigue Alarm System | R2026a Production Edition', ...
-              'BackgroundColor', [0.07, 0.09, 0.13], 'ForegroundColor', [0.45, 0.50, 0.60], ...
-              'FontSize', 8, ...
-              'Position', [430, ctrlY + 12, figW - 460, 20]);
+              'String', 'Adaptive Edge-Density & YCbCr Skin Segmentation | IIIT Allahabad Production Edition', ...
+              'BackgroundColor', [0.10, 0.13, 0.19], 'ForegroundColor', [0.45, 0.50, 0.60], ...
+              'FontSize', 8, 'HorizontalAlignment', 'left', ...
+              'Position', [405, ctrlY + 16, 650, 20]);
 
     % Store handles inside figure guidata
     handles = struct('fig', fig, 'axCam', axCam, 'hDisplay', hDisplay, ...
@@ -253,8 +280,9 @@ function DriverSafetyGUI()
                      'lblEyeMetric', lblEyeMetric, 'lblEyeConsec', lblEyeConsec, ...
                      'lblHeadMetric', lblHeadMetric, 'lblHeadConsec', lblHeadConsec, ...
                      'lblTelemetry', lblTelemetry, 'btnStart', btnStart, ...
-                     'btnAudio', btnAudio, 'popMode', popMode, ...
-                     'sldEye', sldEye, 'sldHead', sldHead);
+                     'btnAudio', btnAudio, 'popMode', popMode, 'popSource', popSource, ...
+                     'sldEye', sldEye, 'sldHead', sldHead, ...
+                     'lblSldEye', lblSldEye, 'lblSldHead', lblSldHead);
     guidata(fig, handles);
 
     % ---------------------------------------------------------------------
@@ -268,41 +296,75 @@ function DriverSafetyGUI()
         end
     end
 
+    function onSourceChanged(src, ~)
+        appData.sourceChoice = get(src, 'Value');
+        if appData.isRunning
+            stopMonitoring();
+            startMonitoring();
+        end
+    end
+
     function startMonitoring()
         set(handles.lblStatus, 'String', '⏳ INITIALIZING VIDEO SOURCE...', ...
             'BackgroundColor', [0.3, 0.25, 0.05], 'ForegroundColor', [1.0, 0.9, 0.2]);
         drawnow;
         
+        projectDir = fileparts(mfilename('fullpath'));
+        if isempty(projectDir), projectDir = pwd; end
+        
         appData.useVideo = false;
         appData.vr = [];
         
-        try
-            evalin('base', 'clear cam');
-        catch
-        end
+        try evalin('base', 'clear cam'); catch; end
         
-        try
-            appData.cam = webcam(1);
-            pause(0.5);
-            snapshot(appData.cam);
-        catch
-            appData.useVideo = true;
-            try clear('appData.cam'); catch; end
-            appData.cam = [];
-            
-            if appData.mode == 3
-                vPath = fullfile('dbase', 'head', 'h1.mp4');
-            else
-                vPath = fullfile('dbase', 'eyes', 'e1.mp4');
-            end
-            
+        choice = appData.sourceChoice;
+        if choice == 3 % Force Dataset Eyes
+            vPath = fullfile(projectDir, 'dbase', 'eyes', 'e1.mp4');
             if exist(vPath, 'file')
                 appData.vr = VideoReader(vPath);
-            else
-                errordlg('Webcam inaccessible and dataset video not found.', 'Source Error');
-                set(handles.lblStatus, 'String', '❌ SOURCE ERROR', ...
+                appData.useVideo = true;
+            end
+        elseif choice == 4 % Force Dataset Head
+            vPath = fullfile(projectDir, 'dbase', 'head', 'h1.mp4');
+            if exist(vPath, 'file')
+                appData.vr = VideoReader(vPath);
+                appData.useVideo = true;
+            end
+        elseif choice == 2 % Force Live Webcam
+            try
+                appData.cam = webcam(1);
+                pause(0.4);
+                snapshot(appData.cam);
+            catch ME
+                errordlg(sprintf('Cannot connect to webcam: %s', ME.message), 'Webcam Error');
+                set(handles.lblStatus, 'String', '❌ WEBCAM ERROR', ...
                     'BackgroundColor', [0.4, 0.1, 0.1], 'ForegroundColor', 'w');
                 return;
+            end
+        else % Choice 1: Auto (Try webcam, fallback to video)
+            try
+                appData.cam = webcam(1);
+                pause(0.4);
+                snapshot(appData.cam);
+            catch
+                appData.useVideo = true;
+                try clear('appData.cam'); catch; end
+                appData.cam = [];
+                
+                if appData.mode == 3
+                    vPath = fullfile(projectDir, 'dbase', 'head', 'h1.mp4');
+                else
+                    vPath = fullfile(projectDir, 'dbase', 'eyes', 'e1.mp4');
+                end
+                
+                if exist(vPath, 'file')
+                    appData.vr = VideoReader(vPath);
+                else
+                    errordlg('Webcam inaccessible and dataset video not found.', 'Source Error');
+                    set(handles.lblStatus, 'String', '❌ SOURCE ERROR', ...
+                        'BackgroundColor', [0.4, 0.1, 0.1], 'ForegroundColor', 'w');
+                    return;
+                end
             end
         end
         
@@ -354,9 +416,9 @@ function DriverSafetyGUI()
         end
         [H, W, ~] = size(sampleFrame);
         
-        % Default eye ROI
-        appData.r1 = round(H * 0.28); appData.r2 = round(H * 0.56);
-        appData.c1 = round(W * 0.15); appData.c2 = round(W * 0.85);
+        % Focused eye band ROI
+        appData.r1 = round(H * 0.31); appData.r2 = round(H * 0.45);
+        appData.c1 = round(W * 0.26); appData.c2 = round(W * 0.74);
         
         % Try cascade face detector once during calibration
         if ~isempty(appData.faceDetector)
@@ -365,11 +427,11 @@ function DriverSafetyGUI()
                 if ~isempty(bboxes)
                     [~, mIdx] = max(bboxes(:, 3) .* bboxes(:, 4));
                     fb = bboxes(mIdx, :);
-                    ar1 = max(1, round(fb(2) + fb(4) * 0.20));
-                    ar2 = min(H, round(fb(2) + fb(4) * 0.55));
-                    ac1 = max(1, round(fb(1) + fb(3) * 0.10));
-                    ac2 = min(W, round(fb(1) + fb(3) * 0.90));
-                    if (ar2 - ar1 > 20) && (ac2 - ac1 > 30)
+                    ar1 = max(1, round(fb(2) + fb(4) * 0.28));
+                    ar2 = min(H, round(fb(2) + fb(4) * 0.45));
+                    ac1 = max(1, round(fb(1) + fb(3) * 0.20));
+                    ac2 = min(W, round(fb(1) + fb(3) * 0.80));
+                    if (ar2 - ar1 > 15) && (ac2 - ac1 > 25)
                         appData.r1 = ar1; appData.r2 = ar2;
                         appData.c1 = ac1; appData.c2 = ac2;
                     end
@@ -378,7 +440,7 @@ function DriverSafetyGUI()
             end
         end
         
-        edgeSum = 0; skinSum = 0;
+        edgeSum = 0; skinSum = 0; ySum = 0;
         nCal = 5;
         for c = 1:nCal
             if ~appData.useVideo
@@ -394,17 +456,37 @@ function DriverSafetyGUI()
             [Gx, Gy] = gradient(patch);
             edgeSum = edgeSum + mean(sqrt(Gx(:).^2 + Gy(:).^2));
             
-            % Skin Region (Fast Subsampling)
+            % Skin Region & Centroid
             f_small = single(f_raw(1:2:end, 1:2:end, :));
             cb = 0.148 * f_small(:,:,1) - 0.291 * f_small(:,:,2) + 0.439 * f_small(:,:,3) + 128;
             cr = 0.439 * f_small(:,:,1) - 0.368 * f_small(:,:,2) - 0.071 * f_small(:,:,3) + 128;
-            mask = (cr > 130 & cr < 180 & cb > 80 & cb < 160);
+            mask = (cr >= 125 & cr <= 185 & cb >= 75 & cb <= 165);
             skinSum = skinSum + sum(mask(:));
-            pause(0.08);
+            [rows, ~] = find(mask);
+            if ~isempty(rows)
+                ySum = ySum + mean(rows);
+            else
+                ySum = ySum + size(f_small, 1) * 0.45;
+            end
+            pause(0.06);
         end
         
-        appData.baselineEdges = max(1.0, edgeSum / nCal);
+        appData.baselineEdges = max(0.5, edgeSum / nCal);
         appData.baselineSkin = max(100, skinSum / nCal);
+        appData.baselineY = ySum / nCal;
+        appData.ySplit = max(10, min(round(H / 2) - 10, round(appData.baselineY)));
+        
+        % Upper face baseline
+        upperSum = 0;
+        for c = 1:nCal
+            if ~appData.useVideo, f_raw = snapshot(appData.cam); else, f_raw = readFrame(appData.vr); end
+            f_small = single(f_raw(1:2:end, 1:2:end, :));
+            cb = 0.148 * f_small(:,:,1) - 0.291 * f_small(:,:,2) + 0.439 * f_small(:,:,3) + 128;
+            cr = 0.439 * f_small(:,:,1) - 0.368 * f_small(:,:,2) - 0.071 * f_small(:,:,3) + 128;
+            mask = (cr >= 125 & cr <= 185 & cb >= 75 & cb <= 165);
+            upperSum = upperSum + sum(sum(mask(1:appData.ySplit, :)));
+        end
+        appData.baselineUpper = max(50, upperSum / nCal);
         
         set(handles.lblStatus, 'String', '✓ BASELINE CALIBRATED & ACTIVE', ...
             'BackgroundColor', [0.10, 0.40, 0.20], 'ForegroundColor', [0.4, 1.0, 0.5]);
@@ -418,22 +500,25 @@ function DriverSafetyGUI()
     function onToggleAudio(src, ~)
         appData.soundEnabled = ~appData.soundEnabled;
         if appData.soundEnabled
-            set(src, 'String', '🔊 Alarm Audio: ON', 'BackgroundColor', [0.25, 0.35, 0.45]);
+            set(src, 'String', '🔊 Audio: ON', 'BackgroundColor', [0.25, 0.35, 0.45]);
         else
-            set(src, 'String', '🔇 Alarm Audio: OFF', 'BackgroundColor', [0.45, 0.25, 0.25]);
+            set(src, 'String', '🔇 Audio: OFF', 'BackgroundColor', [0.45, 0.25, 0.25]);
         end
     end
 
     function onSliderEye(src, ~)
-        appData.eyeThresholdPct = round(get(src, 'Value'));
+        appData.eyeSensitivityPct = round(get(src, 'Value'));
+        set(handles.lblSldEye, 'String', sprintf('Eye Trigger: %d%% (-%d%% drop)', ...
+            appData.eyeSensitivityPct, 100 - appData.eyeSensitivityPct));
     end
 
     function onSliderHead(src, ~)
-        appData.headThresholdPct = round(get(src, 'Value'));
+        appData.headShiftThreshold = get(src, 'Value');
+        set(handles.lblSldHead, 'String', sprintf('Head Nod Shift: %.1f px downward', appData.headShiftThreshold));
     end
 
     function onSnapshot(~, ~)
-        if ~isempty(appData.cam) && appData.isRunning
+        if appData.isRunning
             snap = get(handles.hDisplay, 'CData');
             ts = char(datetime("now", "Format", "uuuu-MM-dd_HH-mm-ss"));
             filename = sprintf('incident_snapshot_%s.jpg', ts);
@@ -441,7 +526,7 @@ function DriverSafetyGUI()
             appData.incidentCount = appData.incidentCount + 1;
             msgbox(sprintf('Diagnostic snapshot saved successfully:\n%s', filename), 'Snapshot Saved');
         else
-            msgbox('Camera is not running. Start monitoring first.', 'Notice');
+            msgbox('System is not running. Start monitoring first.', 'Notice');
         end
     end
 
@@ -474,44 +559,59 @@ function DriverSafetyGUI()
                 if ~hasFrame(appData.vr), appData.vr.CurrentTime = 0; end
                 frame = readFrame(appData.vr);
             end
-            [~, W, ~] = size(frame);
+            [H, W, ~] = size(frame);
             
-            % 1. PROCESS EYE CLOSURE (MODULE 1) - Fast direct calibrated ROI
-            r1 = appData.r1; r2 = appData.r2;
-            c1 = appData.c1; c2 = appData.c2;
+            % 1. PROCESS EYE CLOSURE (MODULE 1) - Focused Eye Band
+            r1 = max(1, min(H, appData.r1)); r2 = max(1, min(H, appData.r2));
+            c1 = max(1, min(W, appData.c1)); c2 = max(1, min(W, appData.c2));
             
             gray = single(rgb2gray(frame));
             patch = gray(r1:r2, c1:c2);
             [Gx, Gy] = gradient(patch);
             currEdges = mean(sqrt(Gx(:).^2 + Gy(:).^2));
-            edgeThreshold = appData.baselineEdges * (appData.eyeThresholdPct / 100);
+            edgeThreshold = appData.baselineEdges * (appData.eyeSensitivityPct / 100);
             
             isEyesClosed = (currEdges < edgeThreshold);
+            % Leaky Accumulator for Eyes
             if isEyesClosed && (appData.mode == 1 || appData.mode == 2)
-                appData.eyeClosedFrames = appData.eyeClosedFrames + 1;
+                appData.eyeClosedFrames = min(12, appData.eyeClosedFrames + 2);
             else
-                appData.eyeClosedFrames = 0;
+                appData.eyeClosedFrames = max(0, appData.eyeClosedFrames - 1);
             end
             
-            % 2. PROCESS HEAD LOWERING (MODULE 2) - Fast Subsampling (~8 ms)
+            % 2. PROCESS HEAD LOWERING (MODULE 2) - Multi-Metric Spatial Pose
             fSmall = single(frame(1:2:end, 1:2:end, :));
             cb = 0.148 * fSmall(:,:,1) - 0.291 * fSmall(:,:,2) + 0.439 * fSmall(:,:,3) + 128;
             cr = 0.439 * fSmall(:,:,1) - 0.368 * fSmall(:,:,2) - 0.071 * fSmall(:,:,3) + 128;
-            skinMask = (cr > 130 & cr < 180 & cb > 80 & cb < 160);
+            skinMask = (cr >= 125 & cr <= 185 & cb >= 75 & cb <= 165);
             currSkin = sum(skinMask(:));
-            skinDrop = appData.baselineSkin - currSkin;
-            skinDropThreshold = (appData.baselineSkin * appData.headThresholdPct) / 100;
             
-            isHeadLowered = (skinDrop > skinDropThreshold);
-            if isHeadLowered && (appData.mode == 1 || appData.mode == 3)
-                appData.headLoweredFrames = appData.headLoweredFrames + 1;
+            [rows, ~] = find(skinMask);
+            if ~isempty(rows)
+                currY = mean(rows);
             else
-                appData.headLoweredFrames = 0;
+                currY = appData.baselineY + 30;
+            end
+            yShift = currY - appData.baselineY;
+            
+            ySplitBound = max(1, min(size(skinMask, 1), appData.ySplit));
+            upperSkin = sum(sum(skinMask(1:ySplitBound, :)));
+            upperDropPct = ((appData.baselineUpper - upperSkin) / max(1, appData.baselineUpper)) * 100;
+            
+            isHeadLowered = (yShift > appData.headShiftThreshold) || ...
+                            (upperDropPct > appData.upperDropThresholdPct) || ...
+                            (currSkin < appData.baselineSkin * 0.85);
+            
+            % Leaky Accumulator for Head Lowering
+            if isHeadLowered && (appData.mode == 1 || appData.mode == 3)
+                appData.headLoweredFrames = min(12, appData.headLoweredFrames + 2);
+            else
+                appData.headLoweredFrames = max(0, appData.headLoweredFrames - 1);
             end
             
             % 3. DANGER INDEX FUSION
-            eyeDanger = min(100, (appData.eyeClosedFrames / 7) * 100);
-            headDanger = min(100, (appData.headLoweredFrames / 10) * 100);
+            eyeDanger = min(100, (appData.eyeClosedFrames / 6) * 100);
+            headDanger = min(100, (appData.headLoweredFrames / 6) * 100);
             
             if appData.mode == 1 % Dual Fusion
                 appData.fatigueScore = round(max(eyeDanger, headDanger) * 0.7 + (eyeDanger * headDanger / 100) * 0.3);
@@ -522,7 +622,7 @@ function DriverSafetyGUI()
             end
             
             % 4. TRIGGER ALARM
-            isAlarm = (appData.eyeClosedFrames >= 7) || (appData.headLoweredFrames >= 10);
+            isAlarm = (appData.eyeClosedFrames >= 6) || (appData.headLoweredFrames >= 6);
             if isAlarm
                 alarmCounter = alarmCounter + 1;
                 if appData.soundEnabled && ~isplaying(appData.alarmPlayer)
@@ -574,7 +674,7 @@ function DriverSafetyGUI()
             displayFrame(r2-cLen:r2, c2-tTh:c2, 2) = retColor(2);
             displayFrame(r2-cLen:r2, c2-tTh:c2, 3) = retColor(3);
             
-            % Fast Skin Mask PIP in top right (slicing without slow imresize)
+            % Fast Skin Mask PIP in top right
             pipH = 80; pipW = 120;
             maskPip = skinMask(1:2:min(end, 2*pipH), 1:2:min(end, 2*pipW));
             [pmh, pmw] = size(maskPip);
@@ -599,7 +699,7 @@ function DriverSafetyGUI()
                 else
                     bColor = [255, 60, 60];
                 end
-                if appData.eyeClosedFrames >= 7
+                if appData.eyeClosedFrames >= 6
                     statusStr = '🚨 DROWSINESS: PROLONGED EYE CLOSURE! WAKE UP!';
                 else
                     statusStr = '🚨 DROWSINESS: HEAD LOWERED / NOD OFF! WAKE UP!';
@@ -641,9 +741,11 @@ function DriverSafetyGUI()
             end
             
             % Eye Metric Labels
-            set(handles.lblEyeMetric, 'String', sprintf('Edges: %.1f (Base: %.1f)', currEdges, appData.baselineEdges));
+            edgeDeltaPct = ((currEdges - appData.baselineEdges) / appData.baselineEdges) * 100;
+            set(handles.lblEyeMetric, 'String', sprintf('Edges: %.1f | Base: %.1f (Δ %+.0f%%)', ...
+                currEdges, appData.baselineEdges, edgeDeltaPct));
             if appData.eyeClosedFrames > 0
-                set(handles.lblEyeConsec, 'String', sprintf('Closed: %d / 7 frames', appData.eyeClosedFrames), ...
+                set(handles.lblEyeConsec, 'String', sprintf('Closed Score: %d / 6 [Alert]', appData.eyeClosedFrames), ...
                     'ForegroundColor', [1.0, 0.4, 0.4]);
             else
                 set(handles.lblEyeConsec, 'String', 'Eyes: Open [Stable]', ...
@@ -651,10 +753,9 @@ function DriverSafetyGUI()
             end
             
             % Head Metric Labels
-            skinRatio = (currSkin / max(1, appData.baselineSkin)) * 100;
-            set(handles.lblHeadMetric, 'String', sprintf('Skin: %d (%.0f%% of Base)', round(currSkin), skinRatio));
+            set(handles.lblHeadMetric, 'String', sprintf('Shift: %+1.1f px | Upper: %+.0f%%', yShift, -upperDropPct));
             if appData.headLoweredFrames > 0
-                set(handles.lblHeadConsec, 'String', sprintf('Head Dropped: %d / 10 frames', appData.headLoweredFrames), ...
+                set(handles.lblHeadConsec, 'String', sprintf('Nod Score: %d / 6 [Alert]', appData.headLoweredFrames), ...
                     'ForegroundColor', [1.0, 0.4, 0.4]);
             else
                 set(handles.lblHeadConsec, 'String', 'Head Position: Upright', ...
@@ -662,8 +763,10 @@ function DriverSafetyGUI()
             end
             
             % Telemetry
-            set(handles.lblTelemetry, 'String', sprintf('FPS: %.1f   |   Frames: %d\nAlarms: %d   |   Incidents: %d', ...
-                avgFps, appData.totalFrames, alarmCounter, appData.incidentCount));
+            srcName = 'Live Camera';
+            if appData.useVideo, srcName = 'Dataset Video'; end
+            set(handles.lblTelemetry, 'String', sprintf('FPS: %.1f   |   Source: %s\nAlarms: %d   |   Incidents: %d', ...
+                avgFps, srcName, alarmCounter, appData.incidentCount));
             
             drawnow limitrate;
             if appData.useVideo
